@@ -1,0 +1,225 @@
+
+# run with > julia -p 7
+
+@everywhere  begin
+
+using DataFrames
+using DataArrays
+# medium policy code transition matrix
+#using JLD
+
+#println("medium program worker ",myid(), "starting")
+infile="medium.csv"
+f = open(infile)
+df = readtable(infile)
+nodes=names(df)
+close(f)
+
+transitions = Dict{Tuple{Int64,Int64,Int64},Tuple{Float64, Float64}}()
+
+uniq=unique(df)
+state_arr=by(uniq,[:s],nrow)[1]
+sorted_state=sort(state_arr)
+state_set=Set{Int64}(state_arr)
+num_states=size(state_arr)[1]
+state_dict = Dict(zip(state_arr, 1:num_states))
+
+# assumes rewards are always the same for every (s,a,sp) direction vector
+# NOTE: nrow() function in DataFrames is totally broken for large datasets
+
+k=1
+for s in state_arr #FIXME
+# for s in state_arr[1:10]
+
+    subtable_s = uniq[ uniq[:s] .== s, :]
+    for r_frame in eachrow(subtable_s)
+       a = r_frame[:a]
+       sp = r_frame[:sp]
+       reward = r_frame[:r]
+       ways=size( df[ (df[:s] .== s) & (df[:a].== a) & (df[:sp].== sp), :])[1]
+       total_ways=size( df[ (df[:s] .== s) & (df[:a].== a), :])[1]
+       
+       transitions[(s,a,sp)]=((ways/total_ways),reward)
+       
+    end
+    k=k+1
+    if (k%1000) == 0
+      println(" processing state ",k, " of ",num_states)
+    end
+end
+println("Transition matrix read")
+
+
+# precompute all lookup tables
+
+# uncomment the below in production!
+subtable_s = Dict{Int64,DataFrames.DataFrame}() 
+subtable_s_a = Dict{Tuple{Int64,Int64},DataFrames.DataFrame}() 
+#
+for s in state_arr
+  subtable_s[s]= uniq[ uniq[:s] .== s, :]
+    for a in by(subtable_s[s],[:s,:a],nrow)[:a]
+      subtable_s_a[(s,a)] = subtable_s[s][ subtable_s[s][:a] .== a, :]      
+    end
+end
+
+println("Transition frames precomputed")
+
+# main program for policy computation
+
+function myrange(q::SharedArray)
+    idx = indexpids(q)
+    if idx == 0
+        # This worker is not assigned a piece
+        return 1:0
+    end
+    nchunks = length(procs(q))
+    splits = [round(Int, s) for s in linspace(0,size(q,1),nchunks+1)]
+    splits[idx]+1:splits[idx+1]
+end
+
+function compute(iterations, gamma, total_states, U, Fin)
+
+    range=myrange(U)
+    println("got index: ", range)
+
+#for i in 1:iterations
+ i=1 
+ while true
+   for s in state_arr[range]
+        results=Array{Array{Float64,2},1}()
+        
+        for a in by(subtable_s[s],[:s,:a],nrow)[:a]
+            
+            expected_reward=0.0
+            
+            for sp in subtable_s_a[(s,a)][:sp]
+         
+                probability=transitions[(s,a,sp)][1]
+                reward=transitions[(s,a,sp)][2]
+
+                index_sp = 0  # infer next state by local search
+              
+                if in(sp, state_set)  # in our model already
+                    index_sp=state_dict[sp]
+                else
+				      # need to interpolate
+                    index_sp = findfirst(x -> x>sp, sorted_state)
+                    if (index_sp == 0)
+                      index_sp = findfirst(x -> x<sp, sorted_state)
+                    end
+                    if (index_sp == 0)
+                      println(myid(),": index ", index_sp, " cannot be inferred")
+                      index_sp = 1
+                    end
+                end
+                expected_reward += probability*(reward+gamma*U[index_sp,1])
+                
+            end
+            push!(results, [expected_reward a])
+        end
+        best_utility=-Inf
+        best_action=rand(1:7)
+        
+        for policy in results
+        
+            if policy[1] >= best_utility
+                best_utility=policy[1]
+                best_action=policy[2]
+            end   
+        end
+        index_s= state_dict[s] # this index should always exist
+        U[index_s, 1]=best_utility
+        U[index_s, 2]=best_action
+    end
+    #if (i%10) == 0
+       if (i<=iterations)
+        println("iteration: ", i, " out of ", iterations)
+       else
+        println("roll: ", i)
+       end
+    #end
+    
+    if i==iterations
+       Fin[myid()]=1
+       println("sent fin, rolling idle")
+    end
+   
+    if  Fin[1]==1
+       break
+    end
+    i=i+1
+
+  end #while 
+end   #function
+
+
+end 
+
+# continue main program
+
+U = SharedArray(Float64, (length(state_arr),2))
+Fin = SharedArray(Int64, nprocs())
+fill!(U,0)                         
+iterations=1000
+gamma=0.99
+total_states=50000
+converge_timeout=100
+
+function waiter(Fin)
+  println("started fin waiter")
+  Control = 0
+  while true 
+    sleep(converge_timeout)
+
+    if countnz(Fin)==nworkers()
+       Fin[1]=1
+       break
+    end 
+
+    Current = hash(U[:,2])
+    if (Control == Current)
+       println("No changes for ", converge_timeout, " seconds, converged!")
+       Fin[1]=1
+       break
+    end
+    Control = Current 
+    println("Converence check: policy changed. Next check in ", converge_timeout, "seconds")
+  end
+end
+
+@sync begin
+    for p in procs(U)
+        @async begin
+          remotecall_wait(compute, p, iterations, gamma, total_states, U, Fin)
+        end
+    end
+    @async waiter(Fin)
+end
+
+f=open("medium-exp.policy","w")
+
+optimal_policy=U[:,2]
+policy_dict=Dict(zip(state_arr, optimal_policy))
+
+for j in 1:total_states
+                
+              if (!in(j,state_set))  # state with no information
+
+                 copyindex=findfirst(x -> x>j, sorted_state)
+                 if copyindex==0
+                     copyindex=findfirst(x -> x<j, sorted_state)
+                 end
+                 if copyindex==0
+                     copyindex=1
+                 end
+                 @printf(f, "%s\n", convert(Int64,policy_dict[state_arr[copyindex]]))
+              else
+                 @printf(f, "%s\n", convert(Int64,policy_dict[j]))
+              end
+ end   
+ println("medium policy written")
+ close(f)
+
+
+
