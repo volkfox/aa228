@@ -20,7 +20,9 @@ transitions = Dict{Tuple{Int64,Int64,Int64},Tuple{Float64, Float64}}()
 uniq=unique(df)
 state_arr=by(uniq,[:s],nrow)[1]
 sorted_state=sort(state_arr)
+state_set=Set{Int64}(state_arr)
 num_states=size(state_arr)[1]
+state_dict = Dict(zip(state_arr, 1:num_states))
 
 # assumes rewards are always the same for every (s,a,sp) direction vector
 # NOTE: nrow() function in DataFrames is totally broken for large datasets
@@ -99,13 +101,13 @@ function compute(iterations, gamma, total_states, U, Fin)
                 index_sp=findfirst(state_arr, sp)
                 
                 if (index_sp == 0)
-                    index_sp(x -> x>j, sorted_state)
-                    if index_sp == 0
+                    index_sp = findfirst(x -> x>j, sorted_state)
+                    if (index_sp == 0)
                       index_sp = findfirst(x -> x<j, sorted_state)
                     end
-                    if index_sp == 0
+                    if (index_sp == 0)
                       println(myid(),": index ", index_sp, " cannot be inferred")
-                      index_sp = 139
+                      index_sp = 1
                     end
                 end
                 expected_reward += probability*(reward+gamma*U[index_sp,1])
@@ -123,7 +125,7 @@ function compute(iterations, gamma, total_states, U, Fin)
                 best_action=policy[2]
             end   
         end
-        index_s=findfirst(state_arr, s) # this index should exist
+        index_s= state_dict[s] # this index should always exist
         U[index_s, 1]=best_utility
         U[index_s, 2]=best_action
     end
@@ -153,9 +155,9 @@ U = SharedArray(Float64, (length(state_arr),2))
 Fin = SharedArray(Int64, nprocs())
 fill!(U,0)                         
 iterations=100000
-gamma=0.95
+gamma=0.99
 total_states=100
-converge_timeout=60
+converge_timeout=10
 
 function waiter(Fin)
   println("started fin waiter")
@@ -191,7 +193,6 @@ f=open("small.policy","w")
 
 optimal_policy=U[:,2]
 policy_dict=Dict(zip(state_arr, optimal_policy))
-state_set=Set{Int64}(state_arr)
 
 for j in 1:total_states
                 

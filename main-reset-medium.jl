@@ -19,6 +19,7 @@ transitions = Dict{Tuple{Int64,Int64,Int64},Tuple{Float64, Float64}}()
 
 uniq=unique(df)
 state_arr=by(uniq,[:s],nrow)[1]
+sorted_state=sort(state_arr)
 num_states=size(state_arr)[1]
 
 # assumes rewards are always the same for every (s,a,sp) direction vector
@@ -97,11 +98,17 @@ function compute(iterations, gamma, total_states, U, Fin)
 
                 index_sp=findfirst(state_arr, sp)
                 
-                if (index_sp==0)
-                 expected_reward += probability*reward # next state is captive
-                else
-                 expected_reward += probability*(reward+U[index_sp,1])
+                if (index_sp == 0)
+                    index_sp(x -> x>j, sorted_state)
+                    if index_sp == 0
+                      index_sp = findfirst(x -> x<j, sorted_state)
+                    end
+                    if index_sp == 0
+                      println(myid(),": index ", index_sp, " cannot be inferred")
+                      index_sp = 139
+                    end
                 end
+                expected_reward += probability*(reward+U[index_sp,1])
                 
             end
             push!(results, [expected_reward a])
@@ -173,7 +180,6 @@ optimal_policy=U[:,2]
 policy_dict=Dict(zip(state_arr, optimal_policy))
 state_set=Set{Int64}(state_arr)
 
-sorted_state=sort(state_arr)
 for j in 1:total_states
                 
                 if (!in(j,state_set))  # state with no information

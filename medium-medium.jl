@@ -101,18 +101,19 @@ function compute(iterations, gamma, total_states, U, Fin)
                 index_sp = 0  # infer next state by local search
               
                 if in(sp, state_set)  # in our model already
-                    index_sp=state_dict[sp]
+                    index_sp=state_dict[sp]  
                 else
-				      # need to interpolate
+	        # need to interpolate
                     index_sp = findfirst(x -> x>sp, sorted_state)
                     if (index_sp == 0)
                       index_sp = findfirst(x -> x<sp, sorted_state)
                     end
                     if (index_sp == 0)
-                      println(myid(),": index ", index_sp, " cannot be inferred")
-                      index_sp = 1
-                    end
+                     println(myid(),": index ", index_sp, " cannot be inferred")
+                     index_sp = 1
+                    end 
                 end
+
                 expected_reward += probability*(reward+gamma*U[index_sp,1])
                 
             end
@@ -142,7 +143,7 @@ function compute(iterations, gamma, total_states, U, Fin)
     
     if i==iterations
        Fin[myid()]=1
-       println("sent fin, rolling idle")
+       println("sent fin, rolling free")
     end
    
     if  Fin[1]==1
@@ -161,10 +162,10 @@ end
 U = SharedArray(Float64, (length(state_arr),2))
 Fin = SharedArray(Int64, nprocs())
 fill!(U,0)                         
-iterations=1000
-gamma=0.99
+iterations=10000
+gamma=1.0
 total_states=50000
-converge_timeout=100
+converge_timeout=600
 
 function waiter(Fin)
   println("started fin waiter")
@@ -174,6 +175,7 @@ function waiter(Fin)
 
     if countnz(Fin)==nworkers()
        Fin[1]=1
+       println("stopping workers, saving policy")
        break
     end 
 
@@ -184,7 +186,7 @@ function waiter(Fin)
        break
     end
     Control = Current 
-    println("Converence check: policy changed. Next check in ", converge_timeout, "seconds")
+    println("=> Convergence: policy changed. Recheck in ", converge_timeout, " seconds")
   end
 end
 
