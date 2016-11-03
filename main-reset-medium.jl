@@ -1,4 +1,5 @@
 
+# run with > julia -p 7
 
 @everywhere  begin
 
